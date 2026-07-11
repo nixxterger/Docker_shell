@@ -4,6 +4,8 @@
 
 **Control what a Docker container may do with your folders — straight from the file manager.**
 
+<p align="center"><img src="assets/config-panel.png" width="480" alt="Docker-Shell configuration panel"></p>
+
 Right-click a folder → *Docker Konfig* → pick a running compose container → configure:
 
 | Feature | What it does |
