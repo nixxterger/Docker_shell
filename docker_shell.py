@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 APP_TITLE = "Docker Konfig"
 
@@ -144,6 +144,10 @@ _DE = {
         "Einige Einstellungen greifen erst beim nächsten Öffnen des Tools.",
     "Container path for this folder:":
         "Container-Pfad für diesen Ordner:",
+    # Orphaned masks
+    "Orphaned masks": "Verwaiste Maskierungen",
+    "This project has masks whose host folders no longer exist:\n\n{}\n\nRemove these mask entries now? Otherwise the container may fail to start after the next restart.":
+        "In diesem Projekt gibt es Maskierungen, deren Host-Ordner nicht mehr existieren:\n\n{}\n\nDiese Masken-Einträge jetzt entfernen? Andernfalls kann der Container beim nächsten Neustart nicht mehr starten.",
     # Errors
     "Error": "Fehler",
     "docker compose up failed (rc={}):\n{}":
@@ -446,6 +450,73 @@ class DockerBackend:
         override (folders added by Docker-Shell). None if unknown."""
         return (self.resolve_container_dest(compose_dir, service_name, host_folder)
                 or self._override_dest(compose_dir, service_name, host_folder))
+
+    # ── Orphaned masks ─────────────────────────────────────────
+
+    def _dest_to_host_map(self, compose_dir, service_name):
+        """Known container-dest -> host-path pairs (main compose volumes +
+        the x-docker-shell mapping of folders added by the tool)."""
+        _, override = self._read_override(compose_dir)
+        mapping = (override.get("x-docker-shell") or {}).get("mounts") or {}
+        dest_to_host = {v: k for k, v in mapping.items()}
+        for src, dest in self._compose_volumes(compose_dir, service_name):
+            dest_to_host.setdefault(dest.rstrip("/") or "/", src)
+        return dest_to_host
+
+    def find_orphaned_masks(self, compose_dir, service_name):
+        """Mask entries in the override whose host origin no longer exists.
+
+        Such entries make the container fail to start when Docker cannot
+        create the mount point (e.g. sub-mask below a read-only parent
+        mount whose host folder was deleted). Returns [(dest, host), ...].
+        """
+        _, override = self._read_override(compose_dir)
+        svc = (override.get("services") or {}).get(service_name) or {}
+        dest_to_host = self._dest_to_host_map(compose_dir, service_name)
+        # Deepest known dest first, so sub-masks map to the closest parent
+        known = sorted(dest_to_host.items(), key=lambda kv: -len(kv[0]))
+
+        orphans = []
+        for vol in svc.get("volumes") or []:
+            src, dest = self._vol_src_dest(vol)
+            if src != TEMP_LEER:
+                continue
+            host = dest_to_host.get(dest)
+            if host is None:
+                for d, h in known:
+                    prefix = d.rstrip("/") + "/"
+                    if dest.startswith(prefix):
+                        host = str(Path(h) / dest[len(prefix):])
+                        break
+            if host and not Path(host).exists():
+                orphans.append((dest, host))
+        return orphans
+
+    def remove_orphaned_masks(self, compose_dir, service_name):
+        """Drop orphaned mask volumes from the override. Returns the number
+        of removed entries (the caller applies afterwards)."""
+        orphan_dests = {dest for dest, _ in
+                        self.find_orphaned_masks(compose_dir, service_name)}
+        if not orphan_dests:
+            return 0
+        ov_path, override = self._read_override(compose_dir)
+        svc = (override.get("services") or {}).get(service_name)
+        if not svc or not svc.get("volumes"):
+            return 0
+        kept = []
+        removed = 0
+        for vol in svc["volumes"]:
+            src, dest = self._vol_src_dest(vol)
+            if src == TEMP_LEER and dest in orphan_dests:
+                removed += 1
+                continue
+            kept.append(vol)
+        svc["volumes"] = kept
+        with open(ov_path, "w", encoding="utf-8") as f:
+            yaml.dump(override, f, default_flow_style=False, sort_keys=False,
+                      allow_unicode=True)
+        log.info("Removed %d orphaned mask(s) from %s", removed, ov_path)
+        return removed
 
     # ── Container scan ─────────────────────────────────────────
 
@@ -1103,6 +1174,41 @@ class DockerShellApp(ctk.CTk):
         self.panel_selection.pack_forget()
         self.panel_config.pack(fill="both", expand=True)
         self._load_status(container)
+        self.after(150, lambda: self._check_orphaned_masks(container))
+
+    def _check_orphaned_masks(self, container):
+        """Warn about masks whose host folders were deleted — they would
+        make the container fail to start on its next recreate/reboot."""
+        compose_dir = container.get("compose_dir")
+        service_name = container.get("service_name")
+        if not compose_dir or not service_name:
+            return
+        try:
+            orphans = self.backend.find_orphaned_masks(compose_dir, service_name)
+        except Exception:
+            log.exception("Orphan check failed")
+            return
+        if not orphans:
+            return
+        listing = "\n".join(f"• {host}" for _, host in orphans)
+        if not messagebox.askyesno(
+                tr("Orphaned masks"),
+                tr("This project has masks whose host folders no longer "
+                   "exist:\n\n{}\n\nRemove these mask entries now? Otherwise "
+                   "the container may fail to start after the next restart."
+                   ).format(listing),
+                parent=self):
+            return
+        try:
+            self.backend.remove_orphaned_masks(compose_dir, service_name)
+            success, err = self.backend.apply_compose(compose_dir)
+            if not success:
+                messagebox.showerror(tr("Error"), err, parent=self)
+                return
+            self._reload_after_apply(container, compose_dir)
+        except Exception as e:
+            log.exception("Orphan removal failed")
+            messagebox.showerror(tr("Error"), str(e), parent=self)
 
     # ── Panel 1 — container selection ──────────────────────────
 

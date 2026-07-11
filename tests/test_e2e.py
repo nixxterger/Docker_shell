@@ -284,6 +284,23 @@ def main():
             "persisted RO did not survive override deletion"
         ok("persist to main (RO + RAM survive override deletion)")
 
+        # orphaned masks: main_only creates sub-masks; deleting a subfolder
+        # on the host must be detected and cleanly removable
+        ctr = get_ctr(data)
+        apply_mode(data, "main_only", ctr)
+        shutil.rmtree(data / "sub2")
+        orphans = b.find_orphaned_masks(str(proj), "testsvc")
+        assert len(orphans) == 1 and orphans[0][1] == str(data / "sub2"), orphans
+        assert b.remove_orphaned_masks(str(proj), "testsvc") == 1
+        assert b.find_orphaned_masks(str(proj), "testsvc") == []
+        okup, err = b.apply_compose(str(proj)); assert okup, err
+        ctr = get_ctr(data)
+        st = status(data, ctr)
+        assert len([m for m in st["mounts"] if m["masked"]]) == 1, st  # sub1 bleibt
+        apply_mode(data, "rw", ctr)  # aufräumen für die Folgetests
+        ctr = get_ctr(data)
+        ok("orphaned mask detected + removed (host subfolder deleted)")
+
         # remove share: /data disappears from main + override, container
         # loses access
         okup, err = b.remove_share(str(proj), "testsvc", str(data))

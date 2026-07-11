@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Nautilus script — installed to ~/.local/share/nautilus/scripts/
+# Appears under right-click -> Scripts -> "Docker Konfig".
+FOLDER="${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS%%$'\n'*}"
+[ -d "$FOLDER" ] || FOLDER="$(pwd)"
+exec @PYTHON@ @APP@ "$FOLDER"

@@ -59,16 +59,38 @@ exec "${PYTHON}" "${APP}" "\$@"
 EOF
 chmod +x "${BIN_DIR}/docker-shell"
 
-# 5. File manager integration (whatever is present)
-echo "[5/5] File manager integration..."
+# 5. File manager integrations (whatever is present)
+echo "[5/5] File manager integrations..."
 INSTALLED_FM=""
+render() { sed -e "s|@PYTHON@|${PYTHON}|g" -e "s|@APP@|${APP}|g" "$1" > "$2"; }
+
 if command -v nemo >/dev/null; then
     NEMO_ACTIONS="${DATA_HOME}/nemo/actions"
     mkdir -p "${NEMO_ACTIONS}"
-    sed -e "s|@PYTHON@|${PYTHON}|g" -e "s|@APP@|${APP}|g" \
-        "${SOURCE_DIR}/integrations/nemo/docker_konfig.nemo_action.in" \
-        > "${NEMO_ACTIONS}/docker_konfig.nemo_action"
-    INSTALLED_FM="Nemo (right-click a folder → 'Docker Konfig')"
+    render "${SOURCE_DIR}/integrations/nemo/docker_konfig.nemo_action.in" \
+           "${NEMO_ACTIONS}/docker_konfig.nemo_action"
+    INSTALLED_FM="${INSTALLED_FM}Nemo (right-click a folder → 'Docker Konfig'); "
+fi
+if command -v nautilus >/dev/null; then
+    NAUTILUS_SCRIPTS="${DATA_HOME}/nautilus/scripts"
+    mkdir -p "${NAUTILUS_SCRIPTS}"
+    render "${SOURCE_DIR}/integrations/nautilus/Docker Konfig.in" \
+           "${NAUTILUS_SCRIPTS}/Docker Konfig"
+    chmod +x "${NAUTILUS_SCRIPTS}/Docker Konfig"
+    INSTALLED_FM="${INSTALLED_FM}Nautilus (Scripts → 'Docker Konfig'); "
+fi
+if command -v dolphin >/dev/null; then
+    for d in "${DATA_HOME}/kio/servicemenus" "${DATA_HOME}/kservices5/ServiceMenus"; do
+        mkdir -p "$d"
+        render "${SOURCE_DIR}/integrations/dolphin/docker-shell.desktop.in" \
+               "$d/docker-shell.desktop"
+        chmod +x "$d/docker-shell.desktop"
+    done
+    INSTALLED_FM="${INSTALLED_FM}Dolphin (context menu); "
+fi
+if command -v thunar >/dev/null; then
+    echo "  Thunar found — add the custom action manually, see:"
+    echo "  ${SOURCE_DIR}/integrations/thunar/README.md"
 fi
 
 echo ""

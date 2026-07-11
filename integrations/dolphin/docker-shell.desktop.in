@@ -1,0 +1,14 @@
+# Dolphin service menu — installed to ~/.local/share/kio/servicemenus/
+# (Plasma 5.85+/6) and ~/.local/share/kservices5/ServiceMenus/ (older).
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=inode/directory;
+Actions=dockerShellConfig;
+X-KDE-Priority=TopLevel
+
+[Desktop Action dockerShellConfig]
+Name=Docker Config
+Name[de]=Docker Konfig
+Icon=utilities-terminal
+Exec=@PYTHON@ @APP@ %f

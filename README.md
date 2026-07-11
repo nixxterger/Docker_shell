@@ -1,5 +1,7 @@
 # Docker-Shell
 
+[![CI](https://github.com/nixxterger/Docker_shell/actions/workflows/ci.yml/badge.svg)](https://github.com/nixxterger/Docker_shell/actions/workflows/ci.yml)
+
 **Control what a Docker container may do with your folders — straight from the file manager.**
 
 Right-click a folder → *Docker Konfig* → pick a running compose container → configure:
@@ -59,9 +61,20 @@ bash setup.sh
 ```
 
 Installs to `~/.local/share/docker-shell` (venv included), adds a
-`docker-shell <folder>` CLI launcher and — if Nemo is present — a
-right-click action. GUI language follows the system locale (English
-default, German built in, more via language files).
+`docker-shell <folder>` CLI launcher and hooks into the file managers it
+finds. GUI language follows the system locale (English default, German
+built in, more via language files). Remove everything with
+`bash uninstall.sh`.
+
+## File manager integrations
+
+| File manager | Integration | Installed by setup.sh |
+|---|---|---|
+| Nemo (Mint/Cinnamon) | Right-click a folder → "Docker Konfig" | ✔ |
+| Nautilus (GNOME) | Right-click → Scripts → "Docker Konfig" | ✔ |
+| Dolphin (KDE) | Folder context menu → "Docker Config" | ✔ |
+| Thunar (XFCE) | Custom action, see [integrations/thunar](integrations/thunar/README.md) | manual |
+| Any / none | `docker-shell <folder>` from a terminal | ✔ |
 
 ## Settings
 
