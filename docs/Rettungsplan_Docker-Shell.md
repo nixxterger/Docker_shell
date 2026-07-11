@@ -1,5 +1,11 @@
 # Rettungsplan: Docker-Shell Tool
 
+> **ABGESCHLOSSEN — dieses Dokument ist Projekthistorie.** Das Tool wurde
+> anschließend für GitHub portabel gemacht (XDG-Pfade, compose.yaml-Varianten,
+> Preflight-Checks, de/en per Systemsprache, generisches Setup, Tests) und
+> als v1.0.0 nach https://github.com/nixxterger/Docker_shell gepusht.
+> Aktueller Stand: siehe README.md im Repo-Root.
+>
 > **STATUS: UMGESETZT (11.07.2026).** Alle unten beschriebenen Fixes sind in
 > `current/docker_shell.py` implementiert, mit 10 End-to-End-Tests gegen einen
 > echten Wegwerf-Container verifiziert und via `setup.sh` nach
