@@ -201,6 +201,46 @@ def main():
         assert not (proj / "compose.override.yaml").exists()
         ok("reset (override deleted, main compose restored)")
 
+        # inherited rights: subfolder of a mounted volume has no own mount,
+        # but must NOT report "not mounted" (banner bug)
+        ctr = get_ctr(data)
+        st = status(data / "sub1", ctr)
+        assert st["mounts"], "subfolder wrongly reported as not mounted"
+        assert st["mounts"][0]["inherited"] is True
+        assert st["mounts"][0]["masked"] is False
+        ok("inherited rights via parent mount (no false banner)")
+
+        # persist to main: RO for /data written into compose.yaml,
+        # then delete override -> RO must survive
+        cfg = {"target_folder": str(data), "mount_mode": "ro",
+               "ram_limit_gb": 1, "current_volumes": b.get_all_volumes(ctr["id"])}
+        b.persist_to_main(str(proj), "testsvc", cfg)
+        b.write_override(str(proj), "testsvc", cfg)
+        okup, err = b.apply_compose(str(proj)); assert okup, err
+        import yaml as _yaml
+        main_c = _yaml.safe_load((proj / "compose.yaml").read_text())
+        vols = main_c["services"]["testsvc"]["volumes"]
+        assert any(v.endswith(":ro") and ":/data:" in v for v in vols), vols
+        assert main_c["services"]["testsvc"]["deploy"]["resources"]["limits"]["memory"] == "1G"
+        (proj / "compose.override.yaml").unlink()
+        okup, err = b.apply_compose(str(proj)); assert okup, err
+        ctr = get_ctr(data)
+        assert exec_in(ctr, ["touch", "/data/y"])[0] != 0, \
+            "persisted RO did not survive override deletion"
+        ok("persist to main (RO + RAM survive override deletion)")
+
+        # remove share: /data disappears from main + override, container
+        # loses access
+        okup, err = b.remove_share(str(proj), "testsvc", str(data))
+        assert okup, err
+        main_c = _yaml.safe_load((proj / "compose.yaml").read_text())
+        vols = main_c["services"]["testsvc"].get("volumes") or []
+        assert not any(":/data" in str(v) for v in vols), vols
+        ctr = get_ctr(data)  # still listed (new_mount=True now)
+        assert ctr["new_mount"] is True
+        assert exec_in(ctr, ["ls", "/data"])[0] != 0, "/data still exists!"
+        ok("remove share (gone from main+override, access revoked)")
+
         print(f"\nALL {PASSED} TESTS PASSED")
         return 0
 

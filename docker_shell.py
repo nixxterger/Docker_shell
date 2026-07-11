@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 APP_TITLE = "Docker Konfig"
 
@@ -95,8 +95,22 @@ _DE = {
     "No limit": "Kein Limit",
     "Mount": "Mount",
     "Not mounted": "Nicht eingebunden",
+    "inherited": "vererbt",
     "Applied — container is restarting, use 'Back' to reload the status.":
         "Angewendet — Container startet neu, Status bitte über „Zurück“ neu laden.",
+    # Persist / remove share
+    "Make permanent": "Dauerhaft übernehmen",
+    "Remove share": "Freigabe entfernen",
+    "Remove the mount of\n{}\nfrom container '{}'?\n\nThe container will lose access to this folder.":
+        "Die Einbindung von\n{}\naus Container '{}' entfernen?\n\nDer Container verliert den Zugriff auf diesen Ordner.",
+    "Service '{}' not found in the compose file.":
+        "Service '{}' nicht in der Compose-Datei gefunden.",
+    "Saved to the main compose file — survives a reset now.":
+        "In die Haupt-Compose übernommen — übersteht jetzt auch einen Reset.",
+    "Make permanent failed:\n{}":
+        "Dauerhaft übernehmen fehlgeschlagen:\n{}",
+    "Remove share failed:\n{}":
+        "Freigabe entfernen fehlgeschlagen:\n{}",
     # Errors
     "Error": "Fehler",
     "docker compose up failed (rc={}):\n{}":
@@ -407,6 +421,7 @@ class DockerBackend:
                 target_dest = str(real_target)
 
         mount_entries = []
+        parent_mount = None  # deepest mount above the target (inherited rights)
         for m in mounts:
             source = m.get("Source", "")
             dest = m.get("Destination", "")
@@ -421,6 +436,7 @@ class DockerBackend:
                         "dest": dest,
                         "mode": mode,
                         "masked": source == TEMP_LEER,
+                        "inherited": False,
                     })
                 elif (source == TEMP_LEER
                         and dest.startswith(target_dest.rstrip("/") + "/")):
@@ -430,7 +446,19 @@ class DockerBackend:
                         "dest": dest,
                         "mode": mode,
                         "masked": True,
+                        "inherited": False,
                     })
+                elif target_dest.startswith(dest.rstrip("/") + "/"):
+                    # A mount above the target covers it — rights are
+                    # inherited from the deepest such parent
+                    if parent_mount is None or len(dest) > len(parent_mount["dest"]):
+                        parent_mount = {
+                            "source": source,
+                            "dest": dest,
+                            "mode": mode,
+                            "masked": source == TEMP_LEER,
+                            "inherited": True,
+                        }
             else:
                 # Fallback without compose info: source-based match
                 try:
@@ -440,9 +468,16 @@ class DockerBackend:
                             "dest": dest,
                             "mode": mode,
                             "masked": False,
+                            "inherited": False,
                         })
                 except (ValueError, OSError):
                     continue
+
+        # No own mount, but covered by a parent mount -> inherited rights
+        # (prevents the "not mounted" banner for such folders)
+        if parent_mount and not any(
+                e["dest"] == target_dest for e in mount_entries):
+            mount_entries.insert(0, parent_mount)
 
         return {
             "is_isolated": is_isolated,
@@ -632,6 +667,138 @@ class DockerBackend:
             return True, None
         return False, tr("docker compose up failed (rc={}):\n{}").format(rc, err)
 
+    # ── Persist / remove share (main compose) ──────────────────
+
+    @staticmethod
+    def _vol_src_dest(vol):
+        """(source, dest) of a compose volume entry (short or long syntax)."""
+        if isinstance(vol, str):
+            parts = vol.split(":")
+            return parts[0], parts[1] if len(parts) > 1 else ""
+        if isinstance(vol, dict):
+            return vol.get("source", ""), vol.get("target", "")
+        return "", ""
+
+    def _is_target_related(self, vol, target_dest):
+        """Does this volume entry belong to the target folder (base mount
+        or one of its sacrificial-folder sub-masks)?"""
+        src, dest = self._vol_src_dest(vol)
+        if dest == target_dest:
+            return True
+        return src == TEMP_LEER and dest.startswith(target_dest.rstrip("/") + "/")
+
+    def _target_entries(self, target_folder, target_dest, mount_mode):
+        """Volume strings for the target folder in the given mount mode
+        (base entry + sub-masks for 'main folder only')."""
+        entries = []
+        if mount_mode == "masked":
+            entries.append(f"{TEMP_LEER}:{target_dest}")
+        elif mount_mode in ("ro", "main_only"):
+            entries.append(f"{target_folder}:{target_dest}:ro")
+        else:
+            entries.append(f"{target_folder}:{target_dest}")
+        if mount_mode == "main_only":
+            real_target = Path(target_folder).resolve()
+            if real_target.is_dir():
+                for entry in sorted(real_target.iterdir()):
+                    if entry.is_dir():
+                        entries.append(
+                            f"{TEMP_LEER}:{target_dest.rstrip('/')}/{entry.name}")
+        return entries
+
+    def _load_main_compose(self, compose_dir):
+        """(path, parsed dict) of the main compose file; backs it up first."""
+        path = find_compose_file(compose_dir)
+        if not path:
+            raise FileNotFoundError(
+                tr("No compose file found in {}").format(compose_dir))
+        backup = self._backup_path(compose_dir)
+        if not backup.exists():
+            shutil.copy2(path, backup)
+            log.info("Backup created: %s", backup)
+        with open(path, encoding="utf-8") as f:
+            return path, (yaml.safe_load(f) or {})
+
+    def persist_to_main(self, compose_dir, service_name, config):
+        """Write the target folder's mount config (and RAM limit) into the
+        MAIN compose file, so it survives override deletion / reset.
+
+        The network toggle already lives in the main file; the override keeps
+        being regenerated on every apply and simply mirrors these values."""
+        target_folder = str(config["target_folder"])
+        mount_mode = config.get("mount_mode", "rw")
+
+        target_dest = self.resolve_container_dest(
+            compose_dir, service_name, target_folder)
+        if not target_dest:
+            target_dest = str(Path(target_folder).resolve())
+
+        path, compose = self._load_main_compose(compose_dir)
+        svc = (compose.get("services") or {}).get(service_name)
+        if svc is None:
+            raise ValueError(
+                tr("Service '{}' not found in the compose file.").format(service_name))
+
+        kept = [v for v in (svc.get("volumes") or [])
+                if not self._is_target_related(v, target_dest)]
+        svc["volumes"] = kept + self._target_entries(
+            target_folder, target_dest, mount_mode)
+
+        ram_gb = config.get("ram_limit_gb", 0)
+        if ram_gb > 0:
+            svc.setdefault("deploy", {}).setdefault(
+                "resources", {}).setdefault("limits", {})["memory"] = f"{ram_gb}G"
+        else:
+            limits = svc.get("deploy", {}).get("resources", {}).get("limits", {})
+            limits.pop("memory", None)
+
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(compose, f, default_flow_style=False, sort_keys=False,
+                      allow_unicode=True)
+        log.info("Persisted to main compose: %s (%s -> %s)",
+                 path, target_folder, mount_mode)
+
+    def remove_share(self, compose_dir, service_name, target_folder):
+        """Remove the target folder's mount (and its sub-masks) from BOTH the
+        main compose file and the override, then apply.
+
+        Returns (success: bool, error_message: str | None)
+        """
+        target_dest = self.resolve_container_dest(
+            compose_dir, service_name, target_folder)
+        if not target_dest:
+            target_dest = str(Path(str(target_folder)).resolve())
+
+        # Main compose
+        path, compose = self._load_main_compose(compose_dir)
+        svc = (compose.get("services") or {}).get(service_name)
+        if svc is not None and svc.get("volumes"):
+            kept = [v for v in svc["volumes"]
+                    if not self._is_target_related(v, target_dest)]
+            if len(kept) != len(svc["volumes"]):
+                svc["volumes"] = kept
+                with open(path, "w", encoding="utf-8") as f:
+                    yaml.dump(compose, f, default_flow_style=False,
+                              sort_keys=False, allow_unicode=True)
+                log.info("Share removed from main compose: %s", target_dest)
+
+        # Override
+        ov_path = override_path_for(path)
+        if ov_path.exists():
+            with open(ov_path, encoding="utf-8") as f:
+                override = yaml.safe_load(f) or {}
+            ov_svc = (override.get("services") or {}).get(service_name)
+            if ov_svc is not None and ov_svc.get("volumes"):
+                ov_svc["volumes"] = [
+                    v for v in ov_svc["volumes"]
+                    if not self._is_target_related(v, target_dest)]
+                with open(ov_path, "w", encoding="utf-8") as f:
+                    yaml.dump(override, f, default_flow_style=False,
+                              sort_keys=False, allow_unicode=True)
+                log.info("Share removed from override: %s", target_dest)
+
+        return self.apply_compose(compose_dir)
+
     # ── Reset ──────────────────────────────────────────────────
 
     def reset_compose(self, compose_dir):
@@ -710,7 +877,7 @@ class DockerShellApp(ctk.CTk):
         self.title(APP_TITLE)
         # Open at the mouse position (slightly offset so the cursor lands
         # inside), clamped to the screen edges
-        win_w, win_h = 540, 500
+        win_w, win_h = 540, 560
         pos_x = max(0, min(self.winfo_pointerx() - 40,
                            self.winfo_screenwidth() - win_w - 10))
         pos_y = max(0, min(self.winfo_pointery() - 30,
@@ -947,6 +1114,24 @@ class DockerShellApp(ctk.CTk):
         )
         self.btn_ok.pack(side="right")
 
+        # Second row: persist to main compose / remove the share entirely
+        frame_actions2 = ctk.CTkFrame(p, fg_color="transparent")
+        frame_actions2.pack(fill="x", pady=(8, 0))
+
+        self.btn_persist = ctk.CTkButton(
+            frame_actions2, text=tr("Make permanent"), width=160, height=32,
+            font=ctk.CTkFont(size=12), fg_color="#2a3a4a", hover_color="#3a4a5a",
+            command=self._on_persist,
+        )
+        self.btn_persist.pack(side="left", padx=(0, 6))
+
+        self.btn_remove = ctk.CTkButton(
+            frame_actions2, text=tr("Remove share"), width=160, height=32,
+            font=ctk.CTkFont(size=12), fg_color="#4a2a2a", hover_color="#5a3a3a",
+            command=self._on_remove,
+        )
+        self.btn_remove.pack(side="right")
+
     # ── Load status and fill the UI ────────────────────────────
 
     def _load_status(self, container):
@@ -1004,6 +1189,9 @@ class DockerShellApp(ctk.CTk):
         # Status header (Q&A1)
         ram_str = f"{ram_gb} GB" if ram_gb > 0 else tr("No limit")
         mount_display = tr(mount_label)
+        if any(m.get("inherited") for m in status["mounts"]):
+            # Covered by a parent mount — rights are inherited, no banner
+            mount_display += f" ({tr('inherited')})"
         if not status["mounts"]:
             mount_display = tr("Not mounted")
             # Show the prominent banner above the options
@@ -1129,22 +1317,101 @@ class DockerShellApp(ctk.CTk):
             # Update UI state — compose up recreated the container, the old
             # ID is stale -> re-resolve
             self.dropdown_mount.set(tr("Read-Only"))
-            refreshed = self._find_container(
-                container.get("service_name"), compose_dir)
-            if refreshed:
-                self.selected_container = refreshed
-                self._load_status(refreshed)
-            else:
-                self.lbl_status.configure(
-                    text=tr("Applied — container is restarting, use 'Back' "
-                            "to reload the status."),
-                    text_color="#aaaaaa",
-                )
+            self._reload_after_apply(container, compose_dir)
 
         except Exception as e:
             log.exception("Unmask failed")
             messagebox.showerror(
                 tr("Error"), tr("Unmask failed:\n{}").format(e), parent=self)
+
+    # ── Action: make permanent ─────────────────────────────────
+
+    def _on_persist(self):
+        """Apply the current selection AND write it into the main compose
+        file, so it survives override deletion / reset."""
+        container = self.selected_container
+        if not container:
+            return
+
+        compose_dir = container["compose_dir"]
+        service_name = container.get("service_name", container["name"])
+
+        config = {
+            "target_folder": str(self.target_folder),
+            "mount_mode": self._selected_mount_mode(),
+            "ram_limit_gb": int(self.lbl_ram_value.cget("text").split()[0]) if self.toggle_ram.get() else 0,
+            "current_volumes": self.all_volumes,
+        }
+
+        try:
+            self.backend.edit_network_in_main(
+                compose_dir, enable_network=bool(self.toggle_network.get()))
+            self.backend.persist_to_main(compose_dir, service_name, config)
+            self.backend.write_override(compose_dir, service_name, config)
+            success, err = self.backend.apply_compose(compose_dir)
+            if not success:
+                messagebox.showerror(tr("Error"), err, parent=self)
+                return
+
+            self._reload_after_apply(container, compose_dir)
+            self.lbl_status.configure(
+                text=self.lbl_status.cget("text") + "\n✔ "
+                + tr("Saved to the main compose file — survives a reset now."),
+            )
+
+        except Exception as e:
+            log.exception("Persist failed")
+            messagebox.showerror(
+                tr("Error"), tr("Make permanent failed:\n{}").format(e),
+                parent=self)
+
+    # ── Action: remove share ───────────────────────────────────
+
+    def _on_remove(self):
+        """Remove the folder's mount from main compose + override."""
+        container = self.selected_container
+        if not container:
+            return
+
+        compose_dir = container["compose_dir"]
+        service_name = container.get("service_name", container["name"])
+
+        if not messagebox.askyesno(
+                tr("Remove share"),
+                tr("Remove the mount of\n{}\nfrom container '{}'?\n\n"
+                   "The container will lose access to this folder.").format(
+                    self.target_folder, container["name"]),
+                parent=self):
+            return
+
+        try:
+            success, err = self.backend.remove_share(
+                compose_dir, service_name, str(self.target_folder))
+            if not success:
+                messagebox.showerror(tr("Error"), err, parent=self)
+                return
+
+            self._reload_after_apply(container, compose_dir)
+
+        except Exception as e:
+            log.exception("Remove share failed")
+            messagebox.showerror(
+                tr("Error"), tr("Remove share failed:\n{}").format(e),
+                parent=self)
+
+    def _reload_after_apply(self, container, compose_dir):
+        """Re-resolve the container after compose up and refresh the panel."""
+        refreshed = self._find_container(
+            container.get("service_name"), compose_dir)
+        if refreshed:
+            self.selected_container = refreshed
+            self._load_status(refreshed)
+        else:
+            self.lbl_status.configure(
+                text=tr("Applied — container is restarting, use 'Back' "
+                        "to reload the status."),
+                text_color="#aaaaaa",
+            )
 
 
 # ════════════════════════════════════════════════════════════════
