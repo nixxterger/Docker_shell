@@ -9,8 +9,10 @@ Right-click a folder → *Docker Konfig* → pick a running compose container �
 | **Web / Network** | Toggle full network isolation (`network_mode: none`) per project |
 | **Memory limit** | Cap the container's RAM in 1-GB steps |
 | **Mount mode** | Read-Write · Read-Only · Hidden (masked) · Main folder only |
-| **Add folders** | Folders not mounted yet can be added on the fly (container path = host path) |
+| **Add folders** | Folders not mounted yet can be added on the fly |
 | **Unmask** | One click resets all masks back to read-only |
+| **Make permanent / Remove share** | Persist a folder's config into the main compose file, or remove its mount entirely |
+| **Settings** (⋯ menu) | Window position, UI size, language, add-folder naming, defaults, network scope, project reset |
 
 ### The masking trick
 
@@ -59,13 +61,31 @@ bash setup.sh
 Installs to `~/.local/share/docker-shell` (venv included), adds a
 `docker-shell <folder>` CLI launcher and — if Nemo is present — a
 right-click action. GUI language follows the system locale (English
-default, German).
+default, German built in, more via language files).
 
-Optional config in `~/.config/docker-shell/config.yml`:
+## Settings
 
-```yaml
-temp_leer: /path/to/custom/sacrificial/folder
-```
+The ⋯ menu opens a settings dialog (stored in
+`~/.config/docker-shell/config.yml` — the tool works fine without ever
+opening it):
+
+| Key | Values (default first) | Meaning |
+|---|---|---|
+| `window_position` | `pointer` / `center` | Where the window opens |
+| `ui_scale` | `auto` / `small` / `medium` / `large` | Widget scaling |
+| `language` | `auto` / `en` / `de` / `<code>` | UI language (`auto` = system locale) |
+| `add_new_mode` | `host_path` / `preset` / `ask` | Container path when adding a new folder |
+| `add_new_preset` | `/mnt/{name}` | Template for `preset` mode (`{name}` = folder name) |
+| `new_mount_default` | `ro` / `rw` | Preselected mode for newly added folders |
+| `network_scope` | `all` / `service` | Network toggle hits the whole project or only the selected service |
+| `temp_leer` | path | Custom sacrificial folder |
+
+The menu also offers **Reset project**: deletes the override file and
+restores the main compose file from its backup.
+
+**Custom languages:** drop a `lang/<code>.yml` file (English string →
+translation, see `lang/TEMPLATE.yml.example`) next to the app or into
+`~/.local/share/docker-shell/lang/`, then select the code in the settings.
 
 ## Tests
 

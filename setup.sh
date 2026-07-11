@@ -37,6 +37,10 @@ mkdir -p "${INSTALL_DIR}" "${TEMP_LEER}" "${BIN_DIR}"
 echo "[2/5] Installing app to ${INSTALL_DIR}..."
 cp "${SOURCE_DIR}/docker_shell.py" "${APP}"
 chmod +x "${APP}"
+if compgen -G "${SOURCE_DIR}/lang/*.yml" >/dev/null; then
+    mkdir -p "${INSTALL_DIR}/lang"
+    cp "${SOURCE_DIR}/lang/"*.yml "${INSTALL_DIR}/lang/"
+fi
 
 # 3. Virtual environment + dependencies
 if [ -d "${VENV_DIR}" ]; then

@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 APP_TITLE = "Docker Konfig"
 
@@ -111,6 +111,39 @@ _DE = {
         "Dauerhaft übernehmen fehlgeschlagen:\n{}",
     "Remove share failed:\n{}":
         "Freigabe entfernen fehlgeschlagen:\n{}",
+    # Menu / settings
+    "Settings…": "Einstellungen…",
+    "Reset project…": "Projekt zurücksetzen…",
+    "Reset project": "Projekt zurücksetzen",
+    "Reset project '{}'?\n\nThe override file is deleted and the main compose file is restored from its backup. All Docker-Shell changes for this project are reverted.":
+        "Projekt '{}' zurücksetzen?\n\nDie Override-Datei wird gelöscht und die Haupt-Compose aus dem Backup wiederhergestellt. Alle Docker-Shell-Änderungen an diesem Projekt werden rückgängig gemacht.",
+    "Settings": "Einstellungen",
+    "Window position": "Fensterposition",
+    "At mouse pointer": "Am Mauszeiger",
+    "Centered": "Zentriert",
+    "UI size": "Darstellungsgröße",
+    "Auto": "Auto",
+    "Small": "Klein",
+    "Medium": "Mittel",
+    "Large": "Groß",
+    "Language": "Sprache",
+    "System language": "Systemsprache",
+    "Adding new folders": "Neue Ordner aufnehmen",
+    "Use full host path": "Voller Host-Pfad",
+    "Use naming preset": "Namens-Schema",
+    "Ask every time": "Jedes Mal fragen",
+    "Naming preset ({name} = folder name)":
+        "Namens-Schema ({name} = Ordnername)",
+    "Default mode for new folders": "Standard-Modus für neue Ordner",
+    "Network toggle affects": "Netzwerk-Schalter wirkt auf",
+    "All services in the project": "Alle Services des Projekts",
+    "Selected service only": "Nur den gewählten Service",
+    "Save": "Speichern",
+    "Cancel": "Abbrechen",
+    "Some settings take effect after reopening the tool.":
+        "Einige Einstellungen greifen erst beim nächsten Öffnen des Tools.",
+    "Container path for this folder:":
+        "Container-Pfad für diesen Ordner:",
     # Errors
     "Error": "Fehler",
     "docker compose up failed (rc={}):\n{}":
@@ -131,10 +164,11 @@ _LANG = _detect_lang()
 
 
 def tr(text):
-    """Translate a UI string (English key -> system language)."""
-    if _LANG == "de":
-        return _DE.get(text, text)
-    return text
+    """Translate a UI string (English key -> selected language)."""
+    table = globals().get("_TABLES", {}).get(_LANG)
+    if table is None and _LANG == "de":
+        table = _DE
+    return table.get(text, text) if table else text
 
 
 def _notify(msg):
@@ -188,9 +222,71 @@ def _load_config():
 
 _CFG = _load_config()
 
+
+def cfg(key, default=None):
+    """Read a config value (settings dialog writes into _CFG + config.yml)."""
+    return _CFG.get(key, default)
+
+
+def save_config():
+    """Persist the current settings to the config file."""
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        yaml.dump(_CFG, f, default_flow_style=False, allow_unicode=True)
+    log.info("Config saved: %s", CONFIG_FILE)
+
+
+# ── Language tables: built-in de/en + external lang/*.yml files ──
+
+def _load_lang_tables():
+    """Built-in tables plus external ones from lang/ directories.
+    A file lang/fr.yml with 'English key: translation' pairs adds French."""
+    tables = {"de": dict(_DE)}
+    for d in (Path(__file__).resolve().parent / "lang", DATA_DIR / "lang"):
+        if not d.is_dir():
+            continue
+        for f in sorted(list(d.glob("*.yml")) + list(d.glob("*.yaml"))):
+            code = f.stem.lower()
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+                if isinstance(data, dict):
+                    tables[code] = {**tables.get(code, {}), **data}
+            except (OSError, yaml.YAMLError) as e:
+                log.warning("Cannot read language file %s: %s", f, e)
+    return tables
+
+
+_TABLES = _load_lang_tables()
+_lang_cfg = str(cfg("language", "auto")).lower()
+if _lang_cfg and _lang_cfg != "auto":
+    _LANG = _lang_cfg
+
+
+def available_languages():
+    """Language codes selectable in the settings ('en' = built-in default)."""
+    return sorted({"en"} | set(_TABLES.keys()))
+
+
 # The empty "sacrificial" folder that gets bind-mounted over masked paths.
 TEMP_LEER = str(Path(os.path.expanduser(
     str(_CFG.get("temp_leer", DATA_DIR / "temp_leer")))))
+
+
+def default_new_dest(target_folder):
+    """Container path for a folder that is added for the first time,
+    according to the configured naming behavior ('ask' is handled in the
+    UI before this fallback is reached)."""
+    if cfg("add_new_mode", "host_path") == "preset":
+        template = str(cfg("add_new_preset", "/mnt/{name}"))
+        try:
+            dest = template.format(name=Path(str(target_folder)).name)
+            if dest.startswith("/"):
+                return dest
+        except (KeyError, IndexError, ValueError):
+            pass
+        log.warning("Invalid naming preset %r — falling back to host path",
+                    template)
+    return str(Path(str(target_folder)).resolve())
 
 # Compose file names, in lookup order (compose spec first, legacy second)
 COMPOSE_NAMES = ("compose.yaml", "compose.yml",
@@ -305,6 +401,52 @@ class DockerBackend:
                 continue
         return None
 
+    @staticmethod
+    def _read_override(compose_dir):
+        """(path, parsed dict) of the override file, or (None, {})."""
+        base = find_compose_file(compose_dir)
+        if not base:
+            return None, {}
+        ov_path = override_path_for(base)
+        if not ov_path.exists():
+            return ov_path, {}
+        try:
+            with open(ov_path, encoding="utf-8") as f:
+                return ov_path, (yaml.safe_load(f) or {})
+        except (OSError, yaml.YAMLError) as e:
+            log.warning("Cannot read %s: %s", ov_path, e)
+            return ov_path, {}
+
+    def _override_dest(self, compose_dir, service_name, host_folder):
+        """Container path of a folder that was ADDED by Docker-Shell (not in
+        the main compose). Looked up via the x-docker-shell mapping in the
+        override — this survives masking, where the live mount source is the
+        sacrificial folder. Falls back to a source match in the override
+        volumes."""
+        _, override = self._read_override(compose_dir)
+        target = Path(str(host_folder)).resolve()
+        mapping = (override.get("x-docker-shell") or {}).get("mounts") or {}
+        hit = mapping.get(str(target))
+        if hit:
+            return hit
+        svc = (override.get("services") or {}).get(service_name) or {}
+        for vol in svc.get("volumes") or []:
+            src, dest = self._vol_src_dest(vol)
+            if not src or src == TEMP_LEER:
+                continue
+            try:
+                if Path(os.path.expanduser(src)).resolve() == target:
+                    return dest
+            except (ValueError, OSError):
+                continue
+        return None
+
+    def resolve_dest_any(self, compose_dir, service_name, host_folder):
+        """Container path of the host folder: main compose first, then the
+        override (folders added by Docker-Shell). None if unknown."""
+        return (self.resolve_container_dest(compose_dir, service_name, host_folder)
+                or self._override_dest(compose_dir, service_name, host_folder))
+
     # ── Container scan ─────────────────────────────────────────
 
     def scan_containers(self, target_folder=None):
@@ -355,7 +497,7 @@ class DockerBackend:
                 is_known = bool(target_folder) and (
                     self._folder_mounted_in_container(
                         cid, Path(target_folder).resolve())
-                    or self.resolve_container_dest(
+                    or self.resolve_dest_any(
                         compose_dir, service_name, target_folder) is not None)
                 containers.append({
                     "id": cid,
@@ -414,11 +556,11 @@ class DockerBackend:
         real_target = Path(str(target_folder)).resolve()
         target_dest = None
         if compose_dir and service_name:
-            target_dest = self.resolve_container_dest(
+            target_dest = self.resolve_dest_any(
                 compose_dir, service_name, target_folder)
             if not target_dest:
-                # Newly added folders: container path = host path
-                target_dest = str(real_target)
+                # Genuinely new folder: the dest it WOULD get on apply
+                target_dest = default_new_dest(target_folder)
 
         mount_entries = []
         parent_mount = None  # deepest mount above the target (inherited rights)
@@ -517,17 +659,28 @@ class DockerBackend:
             raise FileNotFoundError(
                 tr("No compose file found in {}").format(compose_dir))
 
-        # Stable container target path from the original compose file.
+        # Stable container target path: main compose first, then the
+        # x-docker-shell mapping in the override (folders added by the tool).
         # Live mounts are useless as a key: while masked, the source is the
         # sacrificial folder and the target folder would be unfindable
         # (switching back to RW/RO would go nowhere).
         real_target = Path(target_folder).resolve()
-        target_dest = self.resolve_container_dest(
+        main_dest = self.resolve_container_dest(
             compose_dir, service_name, target_folder)
-        if not target_dest:
-            # Folder is not a volume yet -> it gets added; container path =
-            # host path (identical view as on the host)
-            target_dest = str(real_target)
+        target_dest = (main_dest
+                       or self._override_dest(compose_dir, service_name,
+                                              target_folder)
+                       or config.get("new_dest")
+                       or default_new_dest(target_folder))
+
+        # Preserve the host->dest mapping of previously added folders
+        _, old_override = self._read_override(compose_dir)
+        dest_mapping = dict(
+            (old_override.get("x-docker-shell") or {}).get("mounts") or {})
+        if not main_dest:
+            # Folder is not in the main compose -> remember its container
+            # path so it stays resolvable even while masked
+            dest_mapping[str(real_target)] = target_dest
 
         # Rebuild volumes — match on the container path (dest), never on
         # the host source
@@ -602,6 +755,9 @@ class DockerBackend:
                 }
             }
 
+        if dest_mapping:
+            override["x-docker-shell"] = {"mounts": dest_mapping}
+
         override_path = override_path_for(base)
         with open(override_path, "w", encoding="utf-8") as f:
             yaml.dump(override, f, default_flow_style=False, sort_keys=False,
@@ -611,11 +767,14 @@ class DockerBackend:
 
     # ── Edit network in main compose ───────────────────────────
 
-    def edit_network_in_main(self, compose_dir, enable_network):
+    def edit_network_in_main(self, compose_dir, enable_network,
+                             service_name=None):
         """Edit network_mode directly in the main compose file.
 
         enable_network=True  -> remove network_mode (default network)
         enable_network=False -> set network_mode: "none" (isolation)
+        With network_scope=service in the config, only service_name is
+        touched; otherwise every service in the project.
         The first edit creates a backup of the original file.
         """
         path = find_compose_file(compose_dir)
@@ -636,7 +795,13 @@ class DockerBackend:
         services = compose.get("services", {})
         modified = False
 
+        scope_service = (service_name
+                         if cfg("network_scope", "all") == "service"
+                         else None)
+
         for sname, sconf in services.items():
+            if scope_service and sname != scope_service:
+                continue
             if enable_network:
                 if sconf.get("network_mode") == "none":
                     del sconf["network_mode"]
@@ -728,10 +893,10 @@ class DockerBackend:
         target_folder = str(config["target_folder"])
         mount_mode = config.get("mount_mode", "rw")
 
-        target_dest = self.resolve_container_dest(
-            compose_dir, service_name, target_folder)
-        if not target_dest:
-            target_dest = str(Path(target_folder).resolve())
+        target_dest = (self.resolve_dest_any(compose_dir, service_name,
+                                             target_folder)
+                       or config.get("new_dest")
+                       or default_new_dest(target_folder))
 
         path, compose = self._load_main_compose(compose_dir)
         svc = (compose.get("services") or {}).get(service_name)
@@ -764,10 +929,9 @@ class DockerBackend:
 
         Returns (success: bool, error_message: str | None)
         """
-        target_dest = self.resolve_container_dest(
-            compose_dir, service_name, target_folder)
-        if not target_dest:
-            target_dest = str(Path(str(target_folder)).resolve())
+        target_dest = (self.resolve_dest_any(compose_dir, service_name,
+                                             target_folder)
+                       or default_new_dest(target_folder))
 
         # Main compose
         path, compose = self._load_main_compose(compose_dir)
@@ -782,16 +946,28 @@ class DockerBackend:
                               sort_keys=False, allow_unicode=True)
                 log.info("Share removed from main compose: %s", target_dest)
 
-        # Override
+        # Override (volumes + x-docker-shell mapping)
         ov_path = override_path_for(path)
         if ov_path.exists():
             with open(ov_path, encoding="utf-8") as f:
                 override = yaml.safe_load(f) or {}
+            changed = False
             ov_svc = (override.get("services") or {}).get(service_name)
             if ov_svc is not None and ov_svc.get("volumes"):
                 ov_svc["volumes"] = [
                     v for v in ov_svc["volumes"]
                     if not self._is_target_related(v, target_dest)]
+                changed = True
+            mapping = (override.get("x-docker-shell") or {}).get("mounts") or {}
+            key = str(Path(str(target_folder)).resolve())
+            if key in mapping:
+                del mapping[key]
+                if mapping:
+                    override["x-docker-shell"] = {"mounts": mapping}
+                else:
+                    override.pop("x-docker-shell", None)
+                changed = True
+            if changed:
                 with open(ov_path, "w", encoding="utf-8") as f:
                     yaml.dump(override, f, default_flow_style=False,
                               sort_keys=False, allow_unicode=True)
@@ -873,17 +1049,29 @@ class DockerShellApp(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
+        # UI scale (auto = leave CustomTkinter's DPI detection alone)
+        scale_map = {"small": 0.85, "medium": 1.0, "large": 1.25}
+        scale = scale_map.get(str(cfg("ui_scale", "auto")))
+        if scale:
+            ctk.set_widget_scaling(scale)
+            ctk.set_window_scaling(scale)
+
         super().__init__()
         self.title(APP_TITLE)
-        # Open at the mouse position (slightly offset so the cursor lands
-        # inside), clamped to the screen edges
         win_w, win_h = 540, 560
-        pos_x = max(0, min(self.winfo_pointerx() - 40,
-                           self.winfo_screenwidth() - win_w - 10))
-        pos_y = max(0, min(self.winfo_pointery() - 30,
-                           self.winfo_screenheight() - win_h - 60))
+        if cfg("window_position", "pointer") == "center":
+            pos_x = max(0, (self.winfo_screenwidth() - win_w) // 2)
+            pos_y = max(0, (self.winfo_screenheight() - win_h) // 2)
+        else:
+            # At the mouse position (slightly offset so the cursor lands
+            # inside), clamped to the screen edges
+            pos_x = max(0, min(self.winfo_pointerx() - 40,
+                               self.winfo_screenwidth() - win_w - 10))
+            pos_y = max(0, min(self.winfo_pointery() - 30,
+                               self.winfo_screenheight() - win_h - 60))
         self.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
         self.resizable(False, False)
+        self.bind("<Escape>", lambda e: self.quit())
 
         # State
         self.selected_container = None     # dict from scan_containers()
@@ -918,12 +1106,36 @@ class DockerShellApp(ctk.CTk):
 
     # ── Panel 1 — container selection ──────────────────────────
 
+    def _menu_button(self, parent):
+        """Small ⋯ button opening the app menu."""
+        return ctk.CTkButton(
+            parent, text="⋯", width=34, height=28,
+            font=ctk.CTkFont(size=16, weight="bold"),
+            fg_color="#333333", hover_color="#444444",
+            command=self._open_menu,
+        )
+
+    def _open_menu(self):
+        """App menu: settings + project reset."""
+        import tkinter as _tk
+        menu = _tk.Menu(self, tearoff=0)
+        menu.add_command(label=tr("Settings…"), command=self._open_settings)
+        menu.add_command(
+            label=tr("Reset project…"), command=self._on_reset_project,
+            state="normal" if self.selected_container else "disabled",
+        )
+        menu.add_separator()
+        menu.add_command(label=f"Docker-Shell v{__version__}", state="disabled")
+        menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+
     def _build_selection_panel(self):
         p = self.panel_selection
 
-        ctk.CTkLabel(p, text=APP_TITLE, font=ctk.CTkFont(size=20, weight="bold")).pack(
-            anchor="w", pady=(0, 4)
-        )
+        header = ctk.CTkFrame(p, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(header, text=APP_TITLE,
+                     font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
+        self._menu_button(header).pack(side="right")
         ctk.CTkLabel(p, text=str(self.target_folder), font=ctk.CTkFont(size=12)).pack(anchor="w")
 
         ctk.CTkFrame(p, height=2, fg_color="#555555").pack(fill="x", pady=(8, 6))
@@ -1008,10 +1220,13 @@ class DockerShellApp(ctk.CTk):
     def _build_config_panel(self):
         p = self.panel_config
 
+        header = ctk.CTkFrame(p, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 6))
         ctk.CTkButton(
-            p, text="← " + tr("Back"), width=80, height=30, font=ctk.CTkFont(size=12),
+            header, text="← " + tr("Back"), width=80, height=30, font=ctk.CTkFont(size=12),
             fg_color="#333333", command=self.show_selection,
-        ).pack(anchor="nw", pady=(0, 6))
+        ).pack(side="left")
+        self._menu_button(header).pack(side="right")
 
         self.lbl_container_title = ctk.CTkLabel(
             p, text="", font=ctk.CTkFont(size=16, weight="bold"),
@@ -1194,6 +1409,12 @@ class DockerShellApp(ctk.CTk):
             mount_display += f" ({tr('inherited')})"
         if not status["mounts"]:
             mount_display = tr("Not mounted")
+            # New folder: preselect the configured default mode (security
+            # first -> read-only unless configured otherwise)
+            default_label = ("Read-Only"
+                             if cfg("new_mount_default", "ro") == "ro"
+                             else "Read-Write")
+            self.dropdown_mount.set(tr(default_label))
             # Show the prominent banner above the options
             self.banner_new_mount.pack(
                 fill="x", pady=(0, 10), before=self.frame_net)
@@ -1243,6 +1464,22 @@ class DockerShellApp(ctk.CTk):
                 return mode
         return "rw"
 
+    def _ask_new_dest_if_needed(self, config):
+        """'Ask every time' mode: prompt for the container path when a brand
+        new folder is being added. Returns False if the user cancelled."""
+        is_new = bool(self.current_status) and not self.current_status["mounts"]
+        if not is_new or cfg("add_new_mode", "host_path") != "ask":
+            return True
+        dialog = ctk.CTkInputDialog(
+            text=tr("Container path for this folder:"), title=APP_TITLE)
+        dest = (dialog.get_input() or "").strip()
+        if not dest:
+            return False  # cancelled -> abort the action
+        if not dest.startswith("/"):
+            dest = "/" + dest
+        config["new_dest"] = dest
+        return True
+
     # ── Action: OK (apply) ─────────────────────────────────────
 
     def _on_apply(self):
@@ -1265,9 +1502,14 @@ class DockerShellApp(ctk.CTk):
             "current_volumes": self.all_volumes,
         }
 
+        if not self._ask_new_dest_if_needed(config):
+            return
+
         try:
             # 1. Edit network in the main compose (F1)
-            self.backend.edit_network_in_main(compose_dir, enable_network=enable_network)
+            self.backend.edit_network_in_main(
+                compose_dir, enable_network=enable_network,
+                service_name=service_name)
 
             # 2. Write the override file
             self.backend.write_override(compose_dir, service_name, config)
@@ -1306,7 +1548,8 @@ class DockerShellApp(ctk.CTk):
 
         try:
             self.backend.edit_network_in_main(
-                compose_dir, enable_network=bool(self.toggle_network.get())
+                compose_dir, enable_network=bool(self.toggle_network.get()),
+                service_name=service_name,
             )
             self.backend.write_override(compose_dir, service_name, config)
             success, err = self.backend.apply_compose(compose_dir)
@@ -1343,9 +1586,13 @@ class DockerShellApp(ctk.CTk):
             "current_volumes": self.all_volumes,
         }
 
+        if not self._ask_new_dest_if_needed(config):
+            return
+
         try:
             self.backend.edit_network_in_main(
-                compose_dir, enable_network=bool(self.toggle_network.get()))
+                compose_dir, enable_network=bool(self.toggle_network.get()),
+                service_name=service_name)
             self.backend.persist_to_main(compose_dir, service_name, config)
             self.backend.write_override(compose_dir, service_name, config)
             success, err = self.backend.apply_compose(compose_dir)
@@ -1412,6 +1659,138 @@ class DockerShellApp(ctk.CTk):
                         "to reload the status."),
                 text_color="#aaaaaa",
             )
+
+    # ── Action: reset project (menu) ───────────────────────────
+
+    def _on_reset_project(self):
+        """Delete the override + restore the main compose from backup."""
+        container = self.selected_container
+        if not container:
+            return
+        compose_dir = container["compose_dir"]
+
+        if not messagebox.askyesno(
+                tr("Reset project"),
+                tr("Reset project '{}'?\n\nThe override file is deleted and "
+                   "the main compose file is restored from its backup. All "
+                   "Docker-Shell changes for this project are reverted."
+                   ).format(compose_dir),
+                parent=self):
+            return
+
+        try:
+            success, err = self.backend.reset_compose(compose_dir)
+            if not success:
+                messagebox.showerror(tr("Error"), err, parent=self)
+                return
+            self._reload_after_apply(container, compose_dir)
+        except Exception as e:
+            log.exception("Reset failed")
+            messagebox.showerror(
+                tr("Error"), tr("Reset failed: {}").format(e), parent=self)
+
+    # ── Settings dialog ────────────────────────────────────────
+
+    def _open_settings(self):
+        """Settings dialog writing to config.yml."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title(tr("Settings"))
+        dlg.geometry(f"420x430+{self.winfo_x() + 60}+{self.winfo_y() + 60}")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        body = ctk.CTkFrame(dlg, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=12)
+
+        def row(label_key, options, cfg_key, default):
+            """Label + option menu bound to a config key. options maps
+            config value -> display label."""
+            frame = ctk.CTkFrame(body, fg_color="transparent")
+            frame.pack(fill="x", pady=(0, 8))
+            ctk.CTkLabel(frame, text=tr(label_key),
+                         font=ctk.CTkFont(size=12)).pack(side="left")
+            values = list(options.values())
+            var = ctk.StringVar(
+                value=options.get(str(cfg(cfg_key, default)),
+                                  options[default]))
+            ctk.CTkOptionMenu(frame, values=values, variable=var,
+                              width=190, height=28,
+                              font=ctk.CTkFont(size=12)).pack(side="right")
+            return var, options
+
+        pos_var, pos_opts = row(
+            "Window position",
+            {"pointer": tr("At mouse pointer"), "center": tr("Centered")},
+            "window_position", "pointer")
+        scale_var, scale_opts = row(
+            "UI size",
+            {"auto": tr("Auto"), "small": tr("Small"),
+             "medium": tr("Medium"), "large": tr("Large")},
+            "ui_scale", "auto")
+        lang_opts = {"auto": tr("System language")}
+        for code in available_languages():
+            lang_opts[code] = code
+        lang_var, _ = row("Language", lang_opts, "language", "auto")
+        add_var, add_opts = row(
+            "Adding new folders",
+            {"host_path": tr("Use full host path"),
+             "preset": tr("Use naming preset"),
+             "ask": tr("Ask every time")},
+            "add_new_mode", "host_path")
+        newmode_var, newmode_opts = row(
+            "Default mode for new folders",
+            {"ro": tr("Read-Only"), "rw": tr("Read-Write")},
+            "new_mount_default", "ro")
+        net_var, net_opts = row(
+            "Network toggle affects",
+            {"all": tr("All services in the project"),
+             "service": tr("Selected service only")},
+            "network_scope", "all")
+
+        # Naming preset text field
+        preset_frame = ctk.CTkFrame(body, fg_color="transparent")
+        preset_frame.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(preset_frame,
+                     text=tr("Naming preset ({name} = folder name)"),
+                     font=ctk.CTkFont(size=11), text_color="#aaaaaa",
+                     ).pack(anchor="w")
+        preset_entry = ctk.CTkEntry(preset_frame, height=28,
+                                    font=ctk.CTkFont(size=12))
+        preset_entry.insert(0, str(cfg("add_new_preset", "/mnt/{name}")))
+        preset_entry.pack(fill="x")
+
+        hint = ctk.CTkLabel(
+            body, text=tr("Some settings take effect after reopening the tool."),
+            font=ctk.CTkFont(size=11), text_color="#aaaaaa", wraplength=380,
+        )
+        hint.pack(pady=(4, 0))
+
+        def rev(options, shown):
+            for value, label in options.items():
+                if label == shown:
+                    return value
+            return list(options)[0]
+
+        def on_save():
+            _CFG["window_position"] = rev(pos_opts, pos_var.get())
+            _CFG["ui_scale"] = rev(scale_opts, scale_var.get())
+            _CFG["language"] = rev(lang_opts, lang_var.get())
+            _CFG["add_new_mode"] = rev(add_opts, add_var.get())
+            _CFG["add_new_preset"] = preset_entry.get().strip() or "/mnt/{name}"
+            _CFG["new_mount_default"] = rev(newmode_opts, newmode_var.get())
+            _CFG["network_scope"] = rev(net_opts, net_var.get())
+            save_config()
+            dlg.destroy()
+
+        btns = ctk.CTkFrame(body, fg_color="transparent")
+        btns.pack(fill="x", pady=(12, 0), side="bottom")
+        ctk.CTkButton(btns, text=tr("Cancel"), width=110, height=32,
+                      fg_color="#333333", command=dlg.destroy,
+                      ).pack(side="left")
+        ctk.CTkButton(btns, text=tr("Save"), width=110, height=32,
+                      fg_color="#2ba640", hover_color="#3cc855",
+                      command=on_save).pack(side="right")
 
 
 # ════════════════════════════════════════════════════════════════

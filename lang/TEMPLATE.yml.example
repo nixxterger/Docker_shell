@@ -1,0 +1,27 @@
+# Docker-Shell language file template
+#
+# Copy this file to <code>.yml (e.g. fr.yml) in this directory or in
+# ~/.local/share/docker-shell/lang/, translate the values, and select the
+# language in the settings (or set "language: fr" in
+# ~/.config/docker-shell/config.yml).
+#
+# Keys are the English UI strings; untranslated keys fall back to English.
+# Placeholders like {} must be kept.
+
+"Web / Network": "Web / Network"
+"Memory limit (RAM)": "Memory limit (RAM)"
+"Mount mode": "Mount mode"
+"Read-Write": "Read-Write"
+"Read-Only": "Read-Only"
+"Hidden (masked)": "Hidden (masked)"
+"Main folder only": "Main folder only"
+"Unmask": "Unmask"
+"Make permanent": "Make permanent"
+"Remove share": "Remove share"
+"Back": "Back"
+"Close": "Close"
+"Settings…": "Settings…"
+"Reset project…": "Reset project…"
+"No running containers found.": "No running containers found."
+"No compose project found": "No compose project found"
+"Error": "Error"

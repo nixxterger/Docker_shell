@@ -27,9 +27,10 @@ _tk.messagebox = types.ModuleType("tkinter.messagebox")
 sys.modules["tkinter"] = _tk
 sys.modules["tkinter.messagebox"] = _tk.messagebox
 
-# Isolate the sacrificial folder into the test sandbox
+# Isolate the sacrificial folder AND the config into the test sandbox
 _SANDBOX = tempfile.mkdtemp(prefix="docker_shell_test_")
 os.environ["XDG_DATA_HOME"] = str(Path(_SANDBOX) / "xdg_data")
+os.environ["XDG_CONFIG_HOME"] = str(Path(_SANDBOX) / "xdg_config")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import docker_shell as ds  # noqa: E402
@@ -62,7 +63,8 @@ def main():
     (data / "sub1" / "a.txt").write_text("sub1-content")
     (neu / "new.txt").write_text("new-content")
 
-    # compose.yaml (spec name, exercises the compose-file-variant support)
+    # compose.yaml (spec name, exercises the compose-file-variant support);
+    # svc2 exists only for the network-scope test
     (proj / "compose.yaml").write_text(
         "services:\n"
         "  testsvc:\n"
@@ -70,6 +72,9 @@ def main():
         "    command: sleep 3600\n"
         "    volumes:\n"
         f"      - {data}:/data\n"
+        "  svc2:\n"
+        "    image: alpine:latest\n"
+        "    command: sleep 3600\n"
     )
 
     Path(ds.TEMP_LEER).mkdir(parents=True, exist_ok=True)
@@ -78,10 +83,11 @@ def main():
     r = sh(["docker", "compose", "up", "-d"], cwd=proj)
     assert r.returncode == 0, r.stderr
 
-    def get_ctr(folder):
+    def get_ctr(folder, service="testsvc"):
         ctrs = [c for c in b.scan_containers(str(folder))
-                if not c["warning"] and c["compose_dir"] == str(proj)]
-        assert ctrs, f"container for {folder} not found"
+                if not c["warning"] and c["compose_dir"] == str(proj)
+                and c["service_name"] == service]
+        assert ctrs, f"container for {folder} ({service}) not found"
         return ctrs[0]
 
     def apply_mode(folder, mode, ctr, ram=0):
@@ -209,6 +215,55 @@ def main():
         assert st["mounts"][0]["inherited"] is True
         assert st["mounts"][0]["masked"] is False
         ok("inherited rights via parent mount (no false banner)")
+
+        # preset naming for added folders + x-docker-shell mapping keeps the
+        # container path resolvable across mask/unmask
+        neu2 = proj / "presetfolder"
+        neu2.mkdir()
+        (neu2 / "p.txt").write_text("preset-content")
+        ds._CFG["add_new_mode"] = "preset"
+        ds._CFG["add_new_preset"] = "/mnt/{name}"
+        try:
+            ctr = get_ctr(neu2)
+            assert ctr["new_mount"] is True
+            apply_mode(neu2, "rw", ctr)
+            ctr = get_ctr(neu2)
+            assert exec_in(ctr, ["cat", "/mnt/presetfolder/p.txt"]) == (0, "preset-content")
+            import yaml as _y
+            ov = _y.safe_load((proj / "compose.override.yaml").read_text())
+            assert ov["x-docker-shell"]["mounts"][str(neu2)] == "/mnt/presetfolder"
+            apply_mode(neu2, "masked", ctr)
+            ctr = get_ctr(neu2)  # must still be resolvable while masked
+            st = status(neu2, ctr)
+            assert st["mounts"] and st["mounts"][0]["masked"], st
+            apply_mode(neu2, "rw", ctr)
+            ctr = get_ctr(neu2)
+            assert exec_in(ctr, ["cat", "/mnt/presetfolder/p.txt"]) == (0, "preset-content")
+            okup, err = b.remove_share(str(proj), "testsvc", str(neu2))
+            assert okup, err
+            ov = _y.safe_load((proj / "compose.override.yaml").read_text())
+            assert str(neu2) not in ((ov.get("x-docker-shell") or {}).get("mounts") or {})
+        finally:
+            ds._CFG["add_new_mode"] = "host_path"
+        ok("preset naming + x-docker-shell mapping (mask-stable, cleaned on remove)")
+
+        # network scope: only the selected service is isolated
+        ds._CFG["network_scope"] = "service"
+        try:
+            b.edit_network_in_main(str(proj), enable_network=False,
+                                   service_name="testsvc")
+            okup, err = b.apply_compose(str(proj)); assert okup, err
+            ctr = get_ctr(data)
+            assert status(data, ctr)["is_isolated"]
+            ctr2 = get_ctr(data, service="svc2")
+            st2 = b.get_status(ctr2["id"], str(data), str(proj), "svc2")
+            assert not st2["is_isolated"], "svc2 was isolated despite service scope"
+            b.edit_network_in_main(str(proj), enable_network=True,
+                                   service_name="testsvc")
+            okup, err = b.apply_compose(str(proj)); assert okup, err
+        finally:
+            ds._CFG["network_scope"] = "all"
+        ok("network scope 'selected service only'")
 
         # persist to main: RO for /data written into compose.yaml,
         # then delete override -> RO must survive
