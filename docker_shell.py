@@ -144,6 +144,25 @@ _DE = {
         "Einige Einstellungen greifen erst beim nächsten Öffnen des Tools.",
     "Container path for this folder:":
         "Container-Pfad für diesen Ordner:",
+    # Tooltips
+    "On: the container has network/internet access. Off: full isolation (network_mode: none).":
+        "An: Der Container hat Netzwerk-/Internetzugriff. Aus: vollständige Isolation (network_mode: none).",
+    "Limit the container's RAM. Off = no limit.":
+        "Begrenzt den Arbeitsspeicher des Containers. Aus = kein Limit.",
+    "RAM limit in 1-GB steps (minimum 1 GB).":
+        "RAM-Limit in 1-GB-Schritten (Minimum 1 GB).",
+    "Read-Write: full access.\nRead-Only: no writes.\nHidden (masked): an empty folder is mounted over this one — data stays on disk but is invisible in the container.\nMain folder only: top level read-only, every subfolder masked.":
+        "Read-Write: voller Zugriff.\nRead-Only: kein Schreiben.\nTemp versteckt: ein leerer Ordner wird über diesen gemountet — Daten bleiben auf der Platte, sind im Container aber unsichtbar.\nNur Hauptordner: oberste Ebene Read-Only, jeder Unterordner maskiert.",
+    "Lift all masks of this folder and set everything back to Read-Only.":
+        "Hebt alle Maskierungen dieses Ordners auf und setzt alles zurück auf Read-Only.",
+    "Apply the selected configuration (override file + project restart) and close.":
+        "Wendet die gewählte Konfiguration an (Override-Datei + Projekt-Neustart) und schließt das Fenster.",
+    "Also write this folder's configuration into the main compose file — survives override deletion and 'Reset project'.":
+        "Schreibt die Konfiguration dieses Ordners zusätzlich in die Haupt-Compose — übersteht Override-Löschung und „Projekt zurücksetzen“.",
+    "Remove this folder's mount from the main compose file and the override — the container loses access.":
+        "Entfernt die Einbindung dieses Ordners aus Haupt-Compose und Override — der Container verliert den Zugriff.",
+    "Settings and project reset.":
+        "Einstellungen und Projekt-Reset.",
     # Orphaned masks
     "Orphaned masks": "Verwaiste Maskierungen",
     "This project has masks whose host folders no longer exist:\n\n{}\n\nRemove these mask entries now? Otherwise the container may fail to start after the next restart.":
@@ -1099,6 +1118,52 @@ def preflight():
 #  GUI — CustomTkinter app with panel switching
 # ════════════════════════════════════════════════════════════════
 
+class Tooltip:
+    """Small hover tooltip (shown after a short delay below the widget)."""
+
+    DELAY_MS = 550
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        self.after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self.after_id = self.widget.after(self.DELAY_MS, self._show)
+
+    def _show(self):
+        if self.tip is not None:
+            return
+        import tkinter as _tk
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tip = _tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        _tk.Label(
+            self.tip, text=self.text, justify="left",
+            background="#1c1c1c", foreground="#dddddd",
+            relief="solid", borderwidth=1,
+            font=("TkDefaultFont", 9), padx=8, pady=5, wraplength=340,
+        ).pack()
+
+    def _cancel(self):
+        if self.after_id is not None:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+
+
 # Canonical mount modes: (English label used as translation key, internal id)
 MOUNT_MODES = [
     ("Read-Write", "rw"),
@@ -1129,7 +1194,7 @@ class DockerShellApp(ctk.CTk):
 
         super().__init__()
         self.title(APP_TITLE)
-        win_w, win_h = 540, 560
+        win_w, win_h = 540, 540
         if cfg("window_position", "pointer") == "center":
             pos_x = max(0, (self.winfo_screenwidth() - win_w) // 2)
             pos_y = max(0, (self.winfo_screenheight() - win_h) // 2)
@@ -1214,12 +1279,14 @@ class DockerShellApp(ctk.CTk):
 
     def _menu_button(self, parent):
         """Small ⋯ button opening the app menu."""
-        return ctk.CTkButton(
+        btn = ctk.CTkButton(
             parent, text="⋯", width=34, height=28,
             font=ctk.CTkFont(size=16, weight="bold"),
             fg_color="#333333", hover_color="#444444",
             command=self._open_menu,
         )
+        Tooltip(btn, tr("Settings and project reset."))
+        return btn
 
     def _open_menu(self):
         """App menu: settings + project reset."""
@@ -1348,110 +1415,147 @@ class DockerShellApp(ctk.CTk):
         )
         self.lbl_status.pack(anchor="w", pady=(0, 10))
 
-        # Banner for not-yet-mounted folders (packed on demand)
+        # ── Action buttons (pinned to the bottom, 2x2 grid) ──────
+        frame_actions = ctk.CTkFrame(p, fg_color="transparent")
+        frame_actions.pack(side="bottom", fill="x", pady=(14, 0))
+        frame_actions.grid_columnconfigure((0, 1), weight=1, uniform="actions")
+
+        self.btn_demask = ctk.CTkButton(
+            frame_actions, text=tr("Unmask"), height=38,
+            font=ctk.CTkFont(size=13),
+            fg_color="#3a3a3a", hover_color="#4a4a4a",
+            command=self._on_demask,
+        )
+        self.btn_demask.grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=(0, 6))
+        Tooltip(self.btn_demask, tr(
+            "Lift all masks of this folder and set everything back to "
+            "Read-Only."))
+
+        self.btn_ok = ctk.CTkButton(
+            frame_actions, text="OK", height=38,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#2b7a3e", hover_color="#349649",
+            command=self._on_apply,
+        )
+        self.btn_ok.grid(row=0, column=1, sticky="ew", padx=(5, 0), pady=(0, 6))
+        Tooltip(self.btn_ok, tr(
+            "Apply the selected configuration (override file + project "
+            "restart) and close."))
+
+        self.btn_persist = ctk.CTkButton(
+            frame_actions, text=tr("Make permanent"), height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color="#3a3a3a", hover_color="#4a4a4a",
+            command=self._on_persist,
+        )
+        self.btn_persist.grid(row=1, column=0, sticky="ew", padx=(0, 5))
+        Tooltip(self.btn_persist, tr(
+            "Also write this folder's configuration into the main compose "
+            "file — survives override deletion and 'Reset project'."))
+
+        self.btn_remove = ctk.CTkButton(
+            frame_actions, text=tr("Remove share"), height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color="#3a3a3a", hover_color="#5a3232",
+            text_color="#e08080",
+            command=self._on_remove,
+        )
+        self.btn_remove.grid(row=1, column=1, sticky="ew", padx=(5, 0))
+        Tooltip(self.btn_remove, tr(
+            "Remove this folder's mount from the main compose file and the "
+            "override — the container loses access."))
+
+        # Banner for not-yet-mounted folders (packed on demand, above card)
         self.banner_new_mount = ctk.CTkLabel(
             p, text="➕  " + tr("This folder is not mounted in the container "
                                 "yet.\n\"OK\" adds it with the selected mount "
                                 "mode."),
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color="#1a1a1a", fg_color="#e6a23c", corner_radius=6,
-            wraplength=480, justify="center", pady=8,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#f0b95a", fg_color="#42351c", corner_radius=8,
+            wraplength=470, justify="center", pady=8,
         )
 
-        # ── Web / network toggle ─────────────────────────────────
-        frame_net = ctk.CTkFrame(p, fg_color="transparent")
-        frame_net.pack(fill="x", pady=(0, 8))
-        self.frame_net = frame_net
+        # ── Options card ─────────────────────────────────────────
+        card = ctk.CTkFrame(p, corner_radius=10)
+        card.pack(fill="x")
+        self.card = card
 
-        ctk.CTkLabel(frame_net, text=tr("Web / Network"), font=ctk.CTkFont(size=13)).pack(
-            side="left"
-        )
+        def option_row(parent, label_key, first=False):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", padx=16, pady=(14 if first else 10, 0))
+            lbl = ctk.CTkLabel(row, text=tr(label_key), font=ctk.CTkFont(size=13))
+            lbl.pack(side="left")
+            return row, lbl
+
+        def separator(parent):
+            ctk.CTkFrame(parent, height=1, fg_color="#3d3d3d").pack(
+                fill="x", padx=16, pady=(12, 0))
+
+        # Web / network toggle
+        row_net, lbl_net = option_row(card, "Web / Network", first=True)
         self.toggle_network = ctk.CTkSwitch(
-            frame_net, text="", width=50, command=self._on_network_toggle,
+            row_net, text="", width=50, command=self._on_network_toggle,
         )
         self.toggle_network.pack(side="right")
+        tip_net = tr("On: the container has network/internet access. "
+                     "Off: full isolation (network_mode: none).")
+        Tooltip(lbl_net, tip_net)
+        Tooltip(self.toggle_network, tip_net)
+        separator(card)
 
-        # ── RAM limit toggle + stepper ───────────────────────────
-        frame_ram = ctk.CTkFrame(p, fg_color="transparent")
-        frame_ram.pack(fill="x", pady=(0, 8))
-
-        ctk.CTkLabel(frame_ram, text=tr("Memory limit (RAM)"), font=ctk.CTkFont(size=13)).pack(
-            side="left"
-        )
+        # RAM limit toggle + stepper (stepper right-aligned below the toggle)
+        row_ram, lbl_ram = option_row(card, "Memory limit (RAM)")
         self.toggle_ram = ctk.CTkSwitch(
-            frame_ram, text="", width=50, command=self._on_ram_toggle,
+            row_ram, text="", width=50, command=self._on_ram_toggle,
         )
         self.toggle_ram.pack(side="right")
+        tip_ram = tr("Limit the container's RAM. Off = no limit.")
+        Tooltip(lbl_ram, tip_ram)
+        Tooltip(self.toggle_ram, tip_ram)
 
-        frame_stepper = ctk.CTkFrame(p, fg_color="transparent")
-        frame_stepper.pack(fill="x", pady=(0, 8))
-
-        self.btn_ram_minus = ctk.CTkButton(
-            frame_stepper, text="−", width=40, height=32, font=ctk.CTkFont(size=16),
-            fg_color="#3a3a3a", command=self._ram_decrease, state="disabled",
-        )
-        self.btn_ram_minus.pack(side="left", padx=(4, 0))
-
-        self.lbl_ram_value = ctk.CTkLabel(
-            frame_stepper, text="1 GB", font=ctk.CTkFont(size=16), width=70,
-        )
-        self.lbl_ram_value.pack(side="left")
+        frame_stepper = ctk.CTkFrame(card, fg_color="transparent")
+        frame_stepper.pack(fill="x", padx=16, pady=(8, 0))
 
         self.btn_ram_plus = ctk.CTkButton(
-            frame_stepper, text="+", width=40, height=32, font=ctk.CTkFont(size=16),
-            fg_color="#3a3a3a", command=self._ram_increase, state="disabled",
+            frame_stepper, text="+", width=36, height=28, font=ctk.CTkFont(size=15),
+            fg_color="#3a3a3a", hover_color="#4a4a4a",
+            command=self._ram_increase, state="disabled",
         )
-        self.btn_ram_plus.pack(side="left", padx=(0, 4))
+        self.btn_ram_plus.pack(side="right")
 
-        # ── Mount mode dropdown ──────────────────────────────────
-        frame_mount = ctk.CTkFrame(p, fg_color="transparent")
-        frame_mount.pack(fill="x", pady=(0, 8))
-
-        ctk.CTkLabel(frame_mount, text=tr("Mount mode"), font=ctk.CTkFont(size=13)).pack(
-            side="left"
+        self.lbl_ram_value = ctk.CTkLabel(
+            frame_stepper, text="1 GB", font=ctk.CTkFont(size=14), width=64,
         )
+        self.lbl_ram_value.pack(side="right")
+        Tooltip(self.lbl_ram_value,
+                tr("RAM limit in 1-GB steps (minimum 1 GB)."))
+
+        self.btn_ram_minus = ctk.CTkButton(
+            frame_stepper, text="−", width=36, height=28, font=ctk.CTkFont(size=15),
+            fg_color="#3a3a3a", hover_color="#4a4a4a",
+            command=self._ram_decrease, state="disabled",
+        )
+        self.btn_ram_minus.pack(side="right")
+        separator(card)
+
+        # Mount mode dropdown
+        row_mount, lbl_mount = option_row(card, "Mount mode")
         self.dropdown_mount = ctk.CTkComboBox(
-            frame_mount,
+            row_mount,
             values=[tr(label) for label, _ in MOUNT_MODES],
-            width=200, command=self._on_mount_change,
+            width=200, command=self._on_mount_change, state="readonly",
         )
         self.dropdown_mount.pack(side="right")
+        tip_mount = tr("Read-Write: full access.\nRead-Only: no writes.\n"
+                       "Hidden (masked): an empty folder is mounted over "
+                       "this one — data stays on disk but is invisible in "
+                       "the container.\nMain folder only: top level "
+                       "read-only, every subfolder masked.")
+        Tooltip(lbl_mount, tip_mount)
+        Tooltip(self.dropdown_mount, tip_mount)
 
-        # ── Action buttons ───────────────────────────────────────
-        frame_actions = ctk.CTkFrame(p, fg_color="transparent")
-        frame_actions.pack(fill="x", pady=(16, 0))
-
-        self.btn_demask = ctk.CTkButton(
-            frame_actions, text=tr("Unmask"), width=130, height=38,
-            font=ctk.CTkFont(size=13), fg_color="#4a4a2a", hover_color="#5a5a3a",
-            command=self._on_demask,
-        )
-        self.btn_demask.pack(side="left", padx=(0, 6))
-
-        self.btn_ok = ctk.CTkButton(
-            frame_actions, text="OK", width=130, height=38,
-            font=ctk.CTkFont(size=14, weight="bold"), fg_color="#2ba640", hover_color="#3cc855",
-            command=self._on_apply,
-        )
-        self.btn_ok.pack(side="right")
-
-        # Second row: persist to main compose / remove the share entirely
-        frame_actions2 = ctk.CTkFrame(p, fg_color="transparent")
-        frame_actions2.pack(fill="x", pady=(8, 0))
-
-        self.btn_persist = ctk.CTkButton(
-            frame_actions2, text=tr("Make permanent"), width=160, height=32,
-            font=ctk.CTkFont(size=12), fg_color="#2a3a4a", hover_color="#3a4a5a",
-            command=self._on_persist,
-        )
-        self.btn_persist.pack(side="left", padx=(0, 6))
-
-        self.btn_remove = ctk.CTkButton(
-            frame_actions2, text=tr("Remove share"), width=160, height=32,
-            font=ctk.CTkFont(size=12), fg_color="#4a2a2a", hover_color="#5a3a3a",
-            command=self._on_remove,
-        )
-        self.btn_remove.pack(side="right")
+        # Bottom padding inside the card
+        ctk.CTkFrame(card, height=14, fg_color="transparent").pack(fill="x")
 
     # ── Load status and fill the UI ────────────────────────────
 
@@ -1521,9 +1625,9 @@ class DockerShellApp(ctk.CTk):
                              if cfg("new_mount_default", "ro") == "ro"
                              else "Read-Write")
             self.dropdown_mount.set(tr(default_label))
-            # Show the prominent banner above the options
+            # Show the prominent banner above the options card
             self.banner_new_mount.pack(
-                fill="x", pady=(0, 10), before=self.frame_net)
+                fill="x", pady=(0, 10), before=self.card)
         else:
             self.banner_new_mount.pack_forget()
         status_line = (
