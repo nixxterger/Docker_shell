@@ -1,0 +1,9 @@
+[Nemo Action]
+Name=Docker Konfig
+Name[en]=Docker Config
+Comment=Docker-Container-Einstellungen für diesen Ordner konfigurieren
+Comment[en]=Configure Docker container settings for this folder
+Exec=@PYTHON@ @APP@ %F
+Icon-Name=utilities-terminal
+Selection=s
+Extensions=dir;
