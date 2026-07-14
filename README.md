@@ -107,6 +107,7 @@ translation, see `lang/TEMPLATE.yml.example`) next to the app or into
 ```bash
 python3 tests/test_e2e.py   # needs Docker; uses a throwaway alpine container
 ```
+⚠️ Hobby project maintained by one person. Use at your own risk (backups included by design).
 
 ## License
 
