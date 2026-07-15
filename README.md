@@ -2,7 +2,10 @@
 
 [![CI](https://github.com/nixxterger/Docker_shell/actions/workflows/ci.yml/badge.svg)](https://github.com/nixxterger/Docker_shell/actions/workflows/ci.yml)
 
-**Control what a Docker container may do with your folders — straight from the file manager.**
+**Control what a Docker container and local AI agentsmay do with your folders — straight from the file manager.**
+
+Docker-Shell adds a small control panel to your file manager. Right-click a folder and change a running compose container's access without manually editing YAML.
+Useful for local coding agents, automatic tools and experimental containers that should not have unrestricted access to your files.
 
 <p align="center"><img src="assets/config-panel.png" width="480" alt="Docker-Shell configuration panel"></p>
 
